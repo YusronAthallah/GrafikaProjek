@@ -12,7 +12,7 @@ from sign_language import detect_finger_number
 from sound_effects import SoundManager
 
 WIDTH, HEIGHT = 900, 620
-NUM_PARTICLES = 3000  
+NUM_PARTICLES = 10000  
 
 lock = threading.Lock()
 shared_data = {
@@ -169,19 +169,48 @@ cached_sign_pos = np.copy(pos_space)
 def generate_text_particles(text):
     if not text:
         return np.copy(pos_space)
-    img = np.zeros((200, 800), dtype=np.uint8)
     
-    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 3.5, 12)[0]
-    text_x = max(0, (800 - text_size[0]) // 2)
-    text_y = (200 + text_size[1]) // 2
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 3.5
+    thickness = 12
+    max_width = 750
     
-    cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 3.5, 255, 12, cv2.LINE_AA)
+    lines = []
+    current_line = ""
+    for char in text:
+        if char == '\n':
+            lines.append(current_line.strip())
+            current_line = ""
+            continue
+            
+        test_line = current_line + char
+        size = cv2.getTextSize(test_line, font, scale, thickness)[0]
+        if size[0] > max_width and current_line != "":
+            lines.append(current_line.strip())
+            current_line = char.lstrip()
+        else:
+            current_line = test_line
+    if current_line or text.endswith('\n'):
+        lines.append(current_line.strip())
+        
+    img = np.zeros((800, 800), dtype=np.uint8)
+    line_height = 110
+    total_height = len(lines) * line_height
+    start_y = (800 - total_height) // 2 + 80
+    
+    for i, line in enumerate(lines):
+        if not line: continue
+        text_size = cv2.getTextSize(line, font, scale, thickness)[0]
+        text_x = max(0, (800 - text_size[0]) // 2)
+        text_y = start_y + i * line_height
+        cv2.putText(img, line, (text_x, text_y), font, scale, 255, thickness, cv2.LINE_AA)
+        
     yi, xi = np.where(img > 0)
     if len(xi) == 0:
         return np.copy(pos_space)
     
     x_t = (xi - 400) / 70.0
-    y_t = -(yi - 100) / 70.0 
+    y_t = -(yi - 400) / 70.0 
     z_t = np.random.uniform(-0.1, 0.1, len(x_t))
     pts = np.stack((x_t, y_t, z_t), axis=-1)
     
@@ -333,27 +362,29 @@ while shared_data["running"]:
             shared_data["running"] = False
         elif event.type == KEYDOWN:
             with lock:
-                if event.key == K_s:
+                if event.key == K_TAB:
                     shared_data["sign_mode"] = not shared_data["sign_mode"]
                     if not shared_data["sign_mode"]:
                         shared_data["mode"] = 1
-                elif event.key == K_a:
+                elif event.key in (K_LSHIFT, K_RSHIFT):
                     # Toggle Sound Mode
                     new_state = sound_mgr.toggle()
                     shared_data["sound_mode"] = new_state
                 elif shared_data["sign_mode"]:
                     if event.key == K_RETURN or event.key == K_KP_ENTER:
-                        if shared_data["detected_number"]:
-                            shared_data["accumulated_text"] += shared_data["detected_number"]
-                            shared_data["trigger_add"] = True
+                        shared_data["accumulated_text"] += "\n"
+                        shared_data["trigger_add"] = True
                     elif event.key == K_BACKSPACE:
                         shared_data["accumulated_text"] = shared_data["accumulated_text"][:-1]
                         shared_data["trigger_add"] = True
                     elif event.key == K_SPACE:
                         shared_data["accumulated_text"] += " "
                         shared_data["trigger_add"] = True
-                    elif event.key == K_c:
+                    elif event.key == K_DELETE:
                         shared_data["accumulated_text"] = ""
+                        shared_data["trigger_add"] = True
+                    elif hasattr(event, 'unicode') and event.unicode.isalnum():
+                        shared_data["accumulated_text"] += event.unicode.upper()
                         shared_data["trigger_add"] = True
 
     with lock:
@@ -380,10 +411,10 @@ while shared_data["running"]:
             cv2.putText(display_frame, f"Angka: {det_number if det_number else '-'}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
             cv2.putText(display_frame, f"Text: {acc_text}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
         else:
-            cv2.putText(display_frame, "SIGN MODE: OFF (Press 'S')", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(display_frame, "NUMBER MODE: OFF (Press 'TAB')", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         # Tampilkan status Sound Mode dengan kotak fill custom
-        sound_label = "SOUND: ON" if is_sound_mode else "SOUND: OFF (Press 'A')"
+        sound_label = "SOUND: ON" if is_sound_mode else "SOUND: OFF (Press 'SHIFT')"
         sound_color = (0, 255, 128) if is_sound_mode else (128, 128, 128)
         
         # Algoritma Fill Area kustom untuk kotak latar belakang indikator suara
