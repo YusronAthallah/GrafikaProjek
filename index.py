@@ -500,7 +500,10 @@ while shared_data["running"]:
             shared_data["trigger_add"] = False
 
     # Update Sound Manager berdasarkan mode saat ini
-    sound_mgr.update(current_mode)
+    if is_shape_mode:
+        sound_mgr.update(0)
+    else:
+        sound_mgr.update(current_mode)
 
     if frame is not None:
         display_frame = frame.copy()
