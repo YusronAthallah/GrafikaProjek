@@ -8,8 +8,9 @@ import numpy as np
 import math
 import threading
 import time
-from sign_language import detect_finger_number
+from number import detect_finger_number
 from sound_effects import SoundManager
+from shapes_3d import generate_cube, generate_pyramid, generate_sphere, generate_torus, generate_cylinder, compute_lighting_colors
 
 WIDTH, HEIGHT = 900, 620
 NUM_PARTICLES = 10000  
@@ -26,7 +27,9 @@ shared_data = {
     "detected_number": None,
     "accumulated_text": "",
     "trigger_add": False,
-    "sound_mode": False
+    "sound_mode": False,
+    "shape_mode": False, 
+    "shape_type": "cube"
 }
 
 # ==========================================
@@ -95,6 +98,33 @@ def custom_fill_rect(img, x, y, w, h, color):
         for col in range(x_start, x_end):
             img[row, col] = color
 
+def _apply_bresenham_to_text(particles):
+    all_b_pts = []
+    
+    # Ambil subset partikel dan urutkan berdasarkan koordinat X
+    subset_size = min(2000, len(particles))
+    subset_idx = np.random.choice(len(particles), subset_size, replace=False)
+    subset = particles[subset_idx]
+    sorted_order = np.argsort(subset[:, 0])
+    sorted_pts = subset[sorted_order]
+    
+    # Hubungkan partikel berurutan yang berdekatan menggunakan Bresenham 3D
+    for i in range(len(sorted_pts) - 1):
+        p1 = sorted_pts[i]
+        p2 = sorted_pts[i + 1]
+        dist = np.linalg.norm(p1 - p2)
+        if 0.02 < dist < 0.3:
+            pts = bresenham_3d(p1[0], p1[1], p1[2], p2[0], p2[1], p2[2])
+            all_b_pts.extend(pts)
+    
+    if all_b_pts:
+        b_arr = np.array(all_b_pts)
+        limit = min(len(b_arr), NUM_PARTICLES // 5)  # Maks 20% partikel
+        sel = np.random.choice(len(b_arr), limit, replace=(limit > len(b_arr)))
+        particles[-limit:] = b_arr[sel]
+    
+    return particles
+
 pos_space = np.random.uniform(-4.0, 4.0, (NUM_PARTICLES, 3))
 # Terapkan Bresenham 3D pada mode Kosmos (membentuk pola konstelasi berlian/silang)
 bresenham_pts = []
@@ -123,6 +153,7 @@ def _make_text_pos(text, img_w=800, font_scale=3.5, thickness=12):
     result = pts[idx]
     result[:, 0] += np.random.normal(0, 0.015, NUM_PARTICLES)
     result[:, 1] += np.random.normal(0, 0.015, NUM_PARTICLES)
+    result = _apply_bresenham_to_text(result)
     return result
 
 # 1 jari
@@ -219,11 +250,37 @@ def generate_text_particles(text):
         pts_sampled = pts[idx]
         pts_sampled[:, 0] += np.random.normal(0, 0.015, NUM_PARTICLES)
         pts_sampled[:, 1] += np.random.normal(0, 0.015, NUM_PARTICLES)
+        pts_sampled = _apply_bresenham_to_text(pts_sampled)
         return pts_sampled
     return np.copy(pos_space)
 
 current_pos = np.copy(pos_space)
 target_pos = np.copy(pos_space)
+
+# ==========================================
+# PRE-GENERATE 3D SHAPES
+# ==========================================
+pos_cube = generate_cube(NUM_PARTICLES, size=3.0)
+pos_pyramid = generate_pyramid(NUM_PARTICLES, base_size=3.5, height=4.0)
+pos_sphere = generate_sphere(NUM_PARTICLES, radius=2.5)
+pos_torus = generate_torus(NUM_PARTICLES, R=2.5, r=1.0)
+pos_cylinder = generate_cylinder(NUM_PARTICLES, radius=2.0, height=4.0)
+
+# Warna dasar untuk bentuk (RGB)
+color_cube = (0.2, 0.8, 1.0)      # Cyan
+color_pyramid = (1.0, 0.8, 0.2)   # Kuning emas
+color_sphere = (1.0, 0.3, 0.3)    # Merah muda/coral
+color_torus = (0.5, 0.2, 1.0)     # Ungu
+color_cylinder = (0.2, 1.0, 0.5)  # Hijau mint
+
+# Map shape identifier
+shape_map = {
+    1: ('cube', pos_cube, color_cube),
+    2: ('pyramid', pos_pyramid, color_pyramid),
+    3: ('sphere', pos_sphere, color_sphere),
+    4: ('torus', pos_torus, color_torus),
+    5: ('cylinder', pos_cylinder, color_cylinder)
+}
 
 # logika deteksi gestur
 def hitung_mode_gestur(hand_landmarks, hand_label="Right"):
@@ -289,6 +346,21 @@ def camera_thread_func():
                 if results.multi_handedness:
                     hand_label = results.multi_handedness[0].classification[0].label
                 local_mode = hitung_mode_gestur(results.multi_hand_landmarks[0], hand_label)
+                
+                # Jika Shape Mode aktif, map gesture mode (1-7) ke shape (1-5)
+                if shared_data["shape_mode"]:
+                    if local_mode == 2:   # 1 jari
+                        local_mode = 1    # -> Cube
+                    elif local_mode == 3: # 2 jari
+                        local_mode = 2    # -> Pyramid
+                    elif local_mode == 4: # 3 jari
+                        local_mode = 3    # -> Sphere
+                    elif local_mode == 7: # 4 jari
+                        local_mode = 4    # -> Torus
+                    elif local_mode in [5, 6]: # Genggam
+                        local_mode = 5    # -> Cylinder
+                    else:
+                        local_mode = 0    # Default / Tidak terdeteksi jelas (agar auto-cycle jalan)
 
             # Posisi tracking menggunakan tangan pertama
             first_hand = results.multi_hand_landmarks[0]
@@ -355,6 +427,12 @@ clock = pygame.time.Clock()
 rotation_angle = 0.0
 hand_x, hand_y, hand_z = 0.0, 0.0, -12.0
 
+# Variabel untuk kontrol mouse
+mouse_dragging = False
+last_mouse_pos = (0, 0)
+mouse_rot_x = 0.0
+mouse_rot_y = 0.0
+
 while shared_data["running"]:
     pygame.event.pump()
     for event in pygame.event.get():
@@ -370,6 +448,11 @@ while shared_data["running"]:
                     # Toggle Sound Mode
                     new_state = sound_mgr.toggle()
                     shared_data["sound_mode"] = new_state
+                elif event.key == K_F1:
+                    # Toggle Shape Mode
+                    shared_data["shape_mode"] = not shared_data["shape_mode"]
+                    if shared_data["shape_mode"]:
+                        shared_data["sign_mode"] = False # Matikan sign mode
                 elif shared_data["sign_mode"]:
                     if event.key == K_RETURN or event.key == K_KP_ENTER:
                         shared_data["accumulated_text"] += "\n"
@@ -386,6 +469,20 @@ while shared_data["running"]:
                     elif hasattr(event, 'unicode') and event.unicode.isalnum():
                         shared_data["accumulated_text"] += event.unicode.upper()
                         shared_data["trigger_add"] = True
+        elif event.type == MOUSEBUTTONDOWN:
+            if event.button == 1: # Klik kiri
+                mouse_dragging = True
+                last_mouse_pos = event.pos
+        elif event.type == MOUSEBUTTONUP:
+            if event.button == 1:
+                mouse_dragging = False
+        elif event.type == MOUSEMOTION:
+            if mouse_dragging:
+                dx = event.pos[0] - last_mouse_pos[0]
+                dy = event.pos[1] - last_mouse_pos[1]
+                mouse_rot_y += dx * 0.5
+                mouse_rot_x += dy * 0.5
+                last_mouse_pos = event.pos
 
     with lock:
         current_mode = shared_data["mode"]
@@ -395,6 +492,7 @@ while shared_data["running"]:
         frame = shared_data["frame"]
         is_sign_mode = shared_data["sign_mode"]
         is_sound_mode = shared_data["sound_mode"]
+        is_shape_mode = shared_data["shape_mode"]
         det_number = shared_data.get("detected_number", "")
         acc_text = shared_data.get("accumulated_text", "")
         
@@ -406,12 +504,16 @@ while shared_data["running"]:
 
     if frame is not None:
         display_frame = frame.copy()
-        if is_sign_mode:
+        if is_shape_mode:
+            shape_name = shape_map.get(current_mode, shape_map[1])[0].upper()
+            cv2.putText(display_frame, "3D SHAPE MODE: ON", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 100, 255), 2)
+            cv2.putText(display_frame, f"Bentuk: {shape_name}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 50), 2)
+        elif is_sign_mode:
             cv2.putText(display_frame, "NUMBER MODE: ON", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             cv2.putText(display_frame, f"Angka: {det_number if det_number else '-'}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
             cv2.putText(display_frame, f"Text: {acc_text}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
         else:
-            cv2.putText(display_frame, "NUMBER MODE: OFF (Press 'TAB')", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(display_frame, "TEXT MODE: ON (F1=Shape, TAB=Number)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         # Tampilkan status Sound Mode dengan kotak fill custom
         sound_label = "SOUND: ON" if is_sound_mode else "SOUND: OFF (Press 'SHIFT')"
@@ -436,39 +538,55 @@ while shared_data["running"]:
     hand_y += (target_hand_y - hand_y) * 0.25
     hand_z += (target_hand_z - hand_z) * 0.25
 
-    if current_mode == 1:
-        target_pos = pos_space
-        rotation_angle += 0.5 
-    elif current_mode == 2:
-        target_pos = pos_upn
-        rotation_angle = 0.0 
-    elif current_mode == 3:
-        target_pos = pos_veteran
-        rotation_angle = 0.0  
-    elif current_mode == 4:
-        target_pos = pos_yogya
-        rotation_angle = 0.0  
-    elif current_mode == 5:
-        target_pos = pos_jokowi
-        rotation_angle = 0.0  
-    elif current_mode == 6:
-        target_pos = pos_lawan
-        rotation_angle = 0.0  
-    elif current_mode == 7:
-        target_pos = pos_upn_veteran
-        rotation_angle = 0.0  
-    elif current_mode == 8:
-        display_str = acc_text if acc_text else (det_number if det_number else "")
-        if display_str:
-            if display_str != current_sign_text:
-                cached_sign_pos = generate_text_particles(display_str)
-                current_sign_text = display_str
-            target_pos = cached_sign_pos
-            rotation_angle = 0.0
+    if is_shape_mode:
+        if current_mode in shape_map:
+            active_shape_info = shape_map[current_mode]
         else:
+            # Fallback atau auto-cycle jika tidak ada gestur valid
+            idx = (int(pygame.time.get_ticks() / 3000) % 5) + 1
+            active_shape_info = shape_map[idx]
+        
+        target_pos = active_shape_info[1]
+        rotation_angle += 1.5 # Rotasi auto pelan untuk pamer 3D
+        current_sign_text = ""
+        
+        # Rotasi interaktif dari posisi tangan dan tarikan mouse
+        rot_x = (hand_y * 10.0) + mouse_rot_x # pitch
+        rot_y = (hand_x * 10.0) + mouse_rot_y # yaw
+    else:
+        if current_mode == 1:
             target_pos = pos_space
-            rotation_angle += 0.2
-            current_sign_text = ""
+            rotation_angle += 0.5 
+        elif current_mode == 2:
+            target_pos = pos_upn
+            rotation_angle = 0.0 
+        elif current_mode == 3:
+            target_pos = pos_veteran
+            rotation_angle = 0.0  
+        elif current_mode == 4:
+            target_pos = pos_yogya
+            rotation_angle = 0.0  
+        elif current_mode == 5:
+            target_pos = pos_jokowi
+            rotation_angle = 0.0  
+        elif current_mode == 6:
+            target_pos = pos_lawan
+            rotation_angle = 0.0  
+        elif current_mode == 7:
+            target_pos = pos_upn_veteran
+            rotation_angle = 0.0  
+        elif current_mode == 8:
+            display_str = acc_text if acc_text else (det_number if det_number else "")
+            if display_str:
+                if display_str != current_sign_text:
+                    cached_sign_pos = generate_text_particles(display_str)
+                    current_sign_text = display_str
+                target_pos = cached_sign_pos
+                rotation_angle = 0.0
+            else:
+                target_pos = pos_space
+                rotation_angle += 0.2
+                current_sign_text = ""
 
     current_pos += (target_pos - current_pos) * 0.15
 
@@ -481,40 +599,59 @@ while shared_data["running"]:
         glTranslatef(0.0, Y_OFFSET, -12.0)
         
     # Transformasi Scaling dinamis untuk mode 5 dan 6
-    if current_mode in [5, 6]:
+    if not is_shape_mode and current_mode in [5, 6]:
         scale = 1.0 + 0.15 * math.sin(pygame.time.get_ticks() / 150.0)
         glScalef(scale, scale, scale)
     
-    glRotatef(rotation_angle, 0.0, 1.0, 0.0)
+    if is_shape_mode:
+        glRotatef(rot_x, 1.0, 0.0, 0.0)
+        glRotatef(rot_y + rotation_angle, 0.0, 1.0, 0.0)
+        # Efek bernapas (breathing) perlahan
+        scale = 1.0 + 0.05 * math.sin(pygame.time.get_ticks() / 500.0)
+        glScalef(scale, scale, scale)
+    else:
+        glRotatef(rotation_angle, 0.0, 1.0, 0.0)
 
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glPointSize(4.5)  
     
     glBegin(GL_POINTS)
-    for i in range(NUM_PARTICLES):
-        if current_mode == 2:
-            glColor4f(1.0, 0.85, 0.0, 0.9)       # UPN - Kuning Emas
-        elif current_mode == 3:
-            glColor4f(0.0, 0.8, 1.0, 0.9)        # VETERAN - Cyan
-        elif current_mode == 4:
-            glColor4f(0.2, 1.0, 0.4, 0.9)        # YOGYAKARTA - Hijau
-        elif current_mode == 5:
-            glColor4f(1.0, 0.15, 0.15, 0.95)     # HIDUP JOKOWI - Merah
-        elif current_mode == 6:
-            glColor4f(0.8, 0.3, 1.0, 0.9)        # SAYA AKAN LAWAN - Ungu
-        elif current_mode == 7:
-            glColor4f(1.0, 0.6, 0.0, 0.9)        # UPN VETERAN YOGYAKARTA - Oranye
-        elif current_mode == 8:
-            glColor4f(0.0, 1.0, 0.53, 0.9)       # Number Mode - Hijau Neon
-        else:
-            glColor4f(0.1, 0.5, 1.0, 0.8)        # Kosmos - Biru  
-            
-        glVertex3f(current_pos[i, 0], current_pos[i, 1], current_pos[i, 2])
+    if is_shape_mode:
+        time_val = pygame.time.get_ticks() / 1000.0
+        shape_type = active_shape_info[0]
+        base_color = active_shape_info[2]
+        
+        # Hitung warna tiap partikel pake simulasi Phong Lighting
+        particle_colors = compute_lighting_colors(current_pos, shape_type, base_color, time_val=time_val)
+        
+        for i in range(NUM_PARTICLES):
+            glColor4f(*particle_colors[i])
+            glVertex3f(current_pos[i, 0], current_pos[i, 1], current_pos[i, 2])
+    else:
+        for i in range(NUM_PARTICLES):
+            if current_mode == 2:
+                glColor4f(1.0, 0.85, 0.0, 0.9)       # UPN - Kuning Emas
+            elif current_mode == 3:
+                glColor4f(0.0, 0.8, 1.0, 0.9)        # VETERAN - Cyan
+            elif current_mode == 4:
+                glColor4f(0.2, 1.0, 0.4, 0.9)        # YOGYAKARTA - Hijau
+            elif current_mode == 5:
+                glColor4f(1.0, 0.15, 0.15, 0.95)     # HIDUP JOKOWI - Merah
+            elif current_mode == 6:
+                glColor4f(0.8, 0.3, 1.0, 0.9)        # SAYA AKAN LAWAN - Ungu
+            elif current_mode == 7:
+                glColor4f(1.0, 0.6, 0.0, 0.9)        # UPN VETERAN YOGYAKARTA - Oranye
+            elif current_mode == 8:
+                glColor4f(0.0, 1.0, 0.53, 0.9)       # Number Mode - Hijau Neon
+            else:
+                glColor4f(0.1, 0.5, 1.0, 0.8)        # Kosmos - Biru  
+                
+            glVertex3f(current_pos[i, 0], current_pos[i, 1], current_pos[i, 2])
     glEnd()
 
     # Algoritma Kurva Bezier dinamis untuk Mode 7
-    if current_mode == 7:
+    if not is_shape_mode and current_mode == 7:
         glBegin(GL_POINTS)
         glColor4f(1.0, 1.0, 0.0, 1.0) # Kuning
         time_val = pygame.time.get_ticks() / 1000.0
